@@ -1,0 +1,16 @@
+expname = TUT-local-nerf
+basedir = ./logs
+datadir = ./data/indoor/local
+dataset_type = synth360
+
+factor = 8
+llffhold = 8
+
+N_rand = 1024
+N_samples = 128
+N_importance = 64
+
+use_viewdirs = True
+raw_noise_std = 1e0
+
+no_batching = True

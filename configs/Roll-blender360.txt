@@ -1,0 +1,12 @@
+expname = Roll-blender360
+basedir = ./logs
+datadir = ./data/blender-kitchn
+dataset_type = synth360
+
+N_rand = 8096
+N_samples = 8
+N_importance = 8
+
+raw_noise_std = 1e0
+
+no_batching = True

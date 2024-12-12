@@ -1,0 +1,13 @@
+expname = Norm-TUT-In-KE101-ADR
+basedir = logs
+datadir = ./data/indoor/KE101
+dataset_type = synth360
+
+
+N_rand = 8096
+N_samples = 8
+N_importance = 32
+
+raw_noise_std = 1e0
+
+no_batching = True
