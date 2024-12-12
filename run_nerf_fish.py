@@ -664,7 +664,7 @@ def train():
     # Cast intrinsics to right types
     _, _, focal = hwf
     # H, W, focal = hwf
-    H, W,focal = images.shape[1],images.shape[2],2.57
+    H, W,focal = images.shape[1],images.shape[2],W//2
     H, W = int(H), int(W)
     hwf = [H, W]
     print("hwf",hwf)
