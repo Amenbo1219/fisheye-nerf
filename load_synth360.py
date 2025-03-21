@@ -46,7 +46,8 @@ def _load_data(basedir):
             print(pose)
             poses.append(pose)
             img = imread(os.path.join(imgdir, line[0]+".png"))/255.
-            # img = cv2.resize(img, (1024, 512))
+            # img = imread(os.path.join(imgdir, line[0]))/255.
+            img = cv2.resize(img, (1024, 1024))
             # img = cv2.resize(img, (320, 160))
             imgs.append(img)
 

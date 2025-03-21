@@ -153,72 +153,62 @@ class NeRF(nn.Module):
         idx_alpha_linear = 2 * self.D + 6
         self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
-def get_rays_fisyeye(H, W, K, c2w,f_eq=302):
+def get_rays_fisyeye(H, W, K, c2w):
     # Rays_Dは光線のθφω(向き情報)，これはあくまでワールド座標系
     # Rays_Oは光線のxzy位置，これもワールド座標系
     # Dirs:W,Hの要素を取り出して，各配列に入れて，レンズの歪みを加算したもの
     # 光線の一つなので，θにはWの焦点距離の影響，φにはHの焦点距離の影響，ωは1が移入される．
     # 球面座標系でのサンプリング
 
-    cx, cy = W / 2, H / 2
+    r=.5
+    i, j = torch.meshgrid(torch.arange(W, dtype=torch.float32), torch.arange(H, dtype=torch.float32), indexing='xy')
+    u = (2 * i / W) - 1 # -1→w→.1 に拡大
+    v = (2 * j / H) -1  # 垂直軸
+    u = u * r
+    v = v * r
+    theta = u * torch.pi # -pi→w→+pi に拡大
+    phi = v * (torch.pi / 2) # pi/2→h→-pi/2 に拡大
     
-    # 画像座標の生成
-    i, j = torch.meshgrid(torch.arange(W, dtype=torch.float32), 
-                          torch.arange(H, dtype=torch.float32), indexing='xy')
-    
-    # 画像平面上の半径 r (中心からの距離)
-    r = torch.sqrt((i - cx) ** 2 + (j - cy) ** 2)
-    
-    # 等距離モデル: θ = r / f
-    theta = r / f_eq  # [H, W]
+    x = torch.sin(theta) * torch.cos(phi)
+    y = torch.cos(theta) * torch.cos(phi)
+    z = torch.sin(phi)
 
-    # 光線の方向を計算
-    x = torch.sin(theta) * (i - cx) / (r + 1e-6)  # 0割防止
-    y = torch.sin(theta) * (j - cy) / (r + 1e-6)
-    z = torch.cos(theta)
-
-    # レイ方向ベクトル
-    # dirs = np.stack([x, -y, -z], -1)  # [H, W, 3]
     dirs = torch.stack([x, y, z], -1)  # [H, W, 3]
-
-    # カメラ座標系からワールド座標系に変換
-    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)  # 回転行列適用
-
-    # 光線の原点 (全てカメラの原点)
-    rays_o = c2w[:3, -1].expand(rays_d.shape)
-
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # rays_d = torch.sum(dirs[..., np.newaxis, :] , -2)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
 
 
-def get_rays_np_fisyeye(H, W, K, c2w,f_eq=302):
-    # 画像の中心
-    cx, cy = W / 2, H / 2
+def get_rays_np_fisyeye(H, W, K, c2w):
     
-    # 画像座標の生成
-    i, j = np.meshgrid(np.arange(W, dtype=np.float32), 
-                       np.arange(H, dtype=np.float32), indexing='xy')
-    
-    # 画像平面上の半径 r (中心からの距離)
-    r = np.sqrt((i - cx) ** 2 + (j - cy) ** 2)
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    r = .5
+    u = (2 * i / W) - 1 # -1→w→.1 に拡大
+    v = (2 * j / H) -1  # 垂直軸
 
-    # 等距離モデル: θ = r / f
-    theta = r / f_eq  # [H, W]
+    u = u * r
+    v = v * r
+    theta = u * np.pi # -pi→w→+pi に拡大
+    phi = v * (np.pi / 2) # pi/2→h→-pi/2 に拡大
+    x = np.sin(theta) * np.cos(phi)
+    y = np.cos(theta) * np.cos(phi)
+    z = np.sin(phi)
 
-    # 光線の方向を計算
-    x = np.sin(theta) * (i - cx) / (r + 1e-6)  # 0割防止
-    y = np.sin(theta) * (j - cy) / (r + 1e-6)
-    z = np.cos(theta)
-
-    # レイ方向ベクトル
-    # dirs = np.stack([x, -y, -z], -1)  # [H, W, 3]
+    # レイの方向ベクトルを作成
     dirs = np.stack([x, y, z], -1)  # [H, W, 3]
-
-    # カメラ座標系からワールド座標系に変換
-    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], axis=-1)  # 回転行列適用
-
-    # 光線の原点 (全てカメラの原点)
-    rays_o = np.broadcast_to(c2w[:3, -1], rays_d.shape)
-
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # rays_d = np.sum(dirs[..., np.newaxis, :] , -2)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
+    # レイの方向ベクトルを作成
+    dirs = np.stack([x, y, z], dim=-1)  # [H, W, 3]
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # rays_d = np.sum(dirs[..., np.newaxis, :] , -2)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
     return rays_o, rays_d
 
 # def get_rays_sp(H, W, K, c2w):
@@ -398,7 +388,7 @@ def get_rays_np_fisyeye(H, W, K, c2w,f_eq=302):
 #     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
 #     return rays_o, rays_d
 
-def ndc_rays_pinhole(H, W, focal, near, rays_o, rays_d):
+def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane
     t = -(near + rays_o[...,2]) / rays_d[...,2]
     rays_o = rays_o + t[...,None] * rays_d
@@ -417,7 +407,7 @@ def ndc_rays_pinhole(H, W, focal, near, rays_o, rays_d):
     
     return rays_o, rays_d
 
-def ndc_rays(H, W, focal, near, rays_o, rays_d):
+# def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane
     # 近接平面に光線原点をシフト
     print("F=",focal)

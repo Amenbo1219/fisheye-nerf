@@ -154,7 +154,7 @@ class NeRF(nn.Module):
         self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
 
-def get_rays_sp(H, W, K, c2w):
+def get_rays_fisyeye(H, W, K, c2w):
     # Rays_Dは光線のθφω(向き情報)，これはあくまでワールド座標系
     # Rays_Oは光線のxzy位置，これもワールド座標系
     # Dirs:W,Hの要素を取り出して，各配列に入れて，レンズの歪みを加算したもの
@@ -179,7 +179,7 @@ def get_rays_sp(H, W, K, c2w):
     return rays_o, rays_d
 
 
-def get_rays_np_sp(H, W, K, c2w):
+def get_rays_np_fisyeye(H, W, K, c2w):
     
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
     # u = (2 * i / W) - 1 # -1→w→.1 に拡大

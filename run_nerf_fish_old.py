@@ -12,7 +12,7 @@ from tqdm import tqdm, trange
 
 import matplotlib.pyplot as plt
 
-from run_nerf_helpers_new import *
+from run_nerf_helpers_old import *
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
@@ -117,7 +117,9 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
 
     sh = rays_d.shape # [..., 3]
     if ndc:
-        # for forward facing scenew
+        # for forward facing scenes
+        
+        
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
         # rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
     # Create ray batch
