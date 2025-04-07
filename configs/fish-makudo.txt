@@ -8,5 +8,5 @@ N_samples = 64
 N_importance = 64
 
 raw_noise_std = 1e0
-
+use_viewdirs = True
 no_batching = True

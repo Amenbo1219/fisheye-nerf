@@ -1,7 +1,7 @@
 expname = fisheye-living
 basedir = ./logs
-datadir = ./data/living-fisheye
-dataset_type = blender
+datadir = ./data/fisheye/Living-fisheye-nerf-axis
+dataset_type = synth360
 
 no_batching = True
 

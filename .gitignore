@@ -5,3 +5,5 @@ logs/*
 *.pyc
 .DS_Store
 *.log
+*.npz
+

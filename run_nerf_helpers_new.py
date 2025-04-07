@@ -179,20 +179,21 @@ def get_rays_fisyeye(H, W, K, c2w,f_eq=302):
 
     # レイ方向ベクトル
     # dirs = np.stack([x, -y, -z], -1)  # [H, W, 3]
-    dirs = torch.stack([x, y, z], -1)  # [H, W, 3]
+    dirs = torch.stack([-1*x,-1*y,-1*z], -1)  # [H, W, 3]
 
     # カメラ座標系からワールド座標系に変換
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)  # 回転行列適用
 
     # 光線の原点 (全てカメラの原点)
     rays_o = c2w[:3, -1].expand(rays_d.shape)
+    pixel_coords = torch.stack([i, j], axis=-1)  # [H, W, 2]
 
-    return rays_o, rays_d
+    return rays_o, rays_d, pixel_coords
 
-
-def get_rays_np_fisyeye(H, W, K, c2w,f_eq=302):
+def get_rays_np_fisyeye(H, W, K, c2w):
     # 画像の中心
     cx, cy = W / 2, H / 2
+    f_eq = K[0][0]
     
     # 画像座標の生成
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), 
@@ -211,15 +212,17 @@ def get_rays_np_fisyeye(H, W, K, c2w,f_eq=302):
 
     # レイ方向ベクトル
     # dirs = np.stack([x, -y, -z], -1)  # [H, W, 3]
-    dirs = np.stack([x, y, z], -1)  # [H, W, 3]
+    dirs = torch.stack([-1*x,-1*y,-1*z], -1)  # [H, W, 3]
+    # dirs = np.stack([x, y, z], -1)  # [H, W, 3]
 
     # カメラ座標系からワールド座標系に変換
     rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], axis=-1)  # 回転行列適用
 
     # 光線の原点 (全てカメラの原点)
     rays_o = np.broadcast_to(c2w[:3, -1], rays_d.shape)
+    pixel_coords = torch.stack([i, j], axis=-1)  # [H, W, 2]
 
-    return rays_o, rays_d
+    return rays_o, rays_d, pixel_coords
 
 # def get_rays_sp(H, W, K, c2w):
 #     # Rays_Dは光線のθφω(向き情報)，これはあくまでワールド座標系
@@ -420,48 +423,81 @@ def ndc_rays_pinhole(H, W, focal, near, rays_o, rays_d):
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane
     # 近接平面に光線原点をシフト
-    print("F=",focal)
-    t = -(near + rays_o[..., 2]) / (rays_d[..., 2] + 1e-6)  # 0除算防止
-    rays_o = rays_o + t[..., None] * rays_d
-
-    # 画像平面上の半径 r を計算
-    r = torch.sqrt(rays_o[..., 0]**2 + rays_o[..., 1]**2)
-
-    # Fisheye の等距離モデルに基づく θ
-    theta = r / focal  # 等距離モデル: θ = r / f
-
-    # θ に基づいた NDC 変換
-    o0 = -torch.sin(theta) * (rays_o[..., 0] / (r + 1e-6))
-    o1 = -torch.sin(theta) * (rays_o[..., 1] / (r + 1e-6))
-    o2 = torch.cos(theta)
-
-    # 光線方向の NDC 変換
-    d_theta = (torch.sqrt(rays_d[..., 0]**2 + rays_d[..., 1]**2)) / focal
-    d0 = -torch.sin(d_theta) * (rays_d[..., 0] / (r + 1e-6))
-    d1 = -torch.sin(d_theta) * (rays_d[..., 1] / (r + 1e-6))
-    d2 = torch.cos(d_theta)
-
-    # 光線の新しい NDC 座標
-    rays_o = torch.stack([o0, o1, o2], -1)
-    rays_d = torch.stack([d0, d1, d2], -1)
-
+    # 1. 原点（rays_o）を near 平面に投影
+    rays_o = rays_o + near * rays_d
     return rays_o, rays_d
 # Hierarchical sampling (section 5.2)
-def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
-    # Get pdf
-    weights = weights + 1e-5 # prevent nans
+# def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+#     # Get pdf
+#     weights = weights + 1e-5 # prevent nans
+#     pdf = weights / torch.sum(weights, -1, keepdim=True)
+#     cdf = torch.cumsum(pdf, -1)
+#     cdf = torch.cat([torch.zeros_like(cdf[...,:1]), cdf], -1)  # (batch, len(bins))
+
+#     # Take uniform samples
+#     if det:
+#         u = torch.linspace(0., 1., steps=N_samples)
+#         u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+#     else:
+#         u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+
+#     # Pytest, overwrite u with numpy's fixed random numbers
+#     if pytest:
+#         np.random.seed(0)
+#         new_shape = list(cdf.shape[:-1]) + [N_samples]
+#         if det:
+#             u = np.linspace(0., 1., N_samples)
+#             u = np.broadcast_to(u, new_shape)
+#         else:
+#             u = np.random.rand(*new_shape)
+#         u = torch.Tensor(u)
+
+#     # Invert CDF
+#     u = u.contiguous()
+#     inds = torch.searchsorted(cdf, u, right=True)
+#     below = torch.max(torch.zeros_like(inds-1), inds-1)
+#     above = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
+#     inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
+
+#     # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+#     # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+#     matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+#     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+#     bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+#     denom = (cdf_g[...,1]-cdf_g[...,0])
+#     denom = torch.where(denom<1e-5, torch.ones_like(denom), denom)
+#     t = (u-cdf_g[...,0])/denom
+#     samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
+
+#     return samples
+
+def sample_pdf(bins, weights, N_samples, det=False, pytest=False, depth_bias=True):
+    # Prevent nans
+    weights = weights + 1e-5  # avoid zero-division or NaN
+
+    # --- ① オプション：深度バイアス（近距離を強調） ---
+    if depth_bias:
+        # bins: [N_rays, N_bins+1] → 中心点 [N_rays, N_bins]
+        depth_center = 0.5 * (bins[..., 1:] + bins[..., :-1])
+        bias = 1.0 / (depth_center + 1e-6)  # closer = higher weight
+        weights = weights * bias
+
+    # Normalize to get pdf
     pdf = weights / torch.sum(weights, -1, keepdim=True)
     cdf = torch.cumsum(pdf, -1)
-    cdf = torch.cat([torch.zeros_like(cdf[...,:1]), cdf], -1)  # (batch, len(bins))
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # (N_rays, N_bins+1)
 
-    # Take uniform samples
+    # Sample u
     if det:
-        u = torch.linspace(0., 1., steps=N_samples)
+        u = torch.linspace(0., 1., steps=N_samples, device=weights.device)
         u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        # 非線形分布で近くを高密度に（オプション）
+        u = u ** 2  # 近距離を強調
     else:
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=weights.device)
 
-    # Pytest, overwrite u with numpy's fixed random numbers
+    # Pytest用（numpy固定値）
     if pytest:
         np.random.seed(0)
         new_shape = list(cdf.shape[:-1]) + [N_samples]
@@ -470,24 +506,79 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
             u = np.broadcast_to(u, new_shape)
         else:
             u = np.random.rand(*new_shape)
-        u = torch.Tensor(u)
+        u = torch.tensor(u, dtype=torch.float32, device=weights.device)
 
-    # Invert CDF
-    u = u.contiguous()
+    # CDFの逆関数でサンプル生成
     inds = torch.searchsorted(cdf, u, right=True)
-    below = torch.max(torch.zeros_like(inds-1), inds-1)
-    above = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
-    inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
+    below = torch.clamp(inds - 1, min=0)
+    above = torch.clamp(inds, max=cdf.shape[-1] - 1)
+    inds_g = torch.stack([below, above], -1)  # (N_rays, N_samples, 2)
 
-    # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
-    # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    # Gather cdf & bins
     matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
     bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
 
-    denom = (cdf_g[...,1]-cdf_g[...,0])
-    denom = torch.where(denom<1e-5, torch.ones_like(denom), denom)
-    t = (u-cdf_g[...,0])/denom
-    samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
+    # 線形補間でサンプル位置を求める
+    denom = cdf_g[..., 1] - cdf_g[..., 0]
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+    t = (u - cdf_g[..., 0]) / denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+
+    return samples
+def sample_pdf_solid_angle(bins, weights, ray_pixel_coords, cx, cy, f_eq, N_samples, det=True):
+    """
+    Args:
+        bins: [N_rays, N_bins+1] - サンプル間の深度区間
+        weights: [N_rays, N_bins] - 各区間の重み
+        ray_pixel_coords: [N_rays, 2] - 各レイの (i, j) ピクセル座標
+        cx, cy: float - 画像中心（W/2, H/2）
+        f_eq: float - 等距離射影の焦点距離
+        N_samples: int - サンプル数
+        det: bool - deterministic sampling
+    """
+
+    # 防NaN用の微小値
+    weights = weights + 1e-5
+
+    # --- (1) Solid Angle バイアスの計算 ---
+    # ピクセル距離 r = sqrt((i-cx)^2 + (j-cy)^2)
+    dx = ray_pixel_coords[:, 0] - cx
+    dy = ray_pixel_coords[:, 1] - cy
+    r = torch.sqrt(dx ** 2 + dy ** 2) + 1e-6  # avoid div 0
+
+    # θ = r / f_eq, bias = 1 / sin(θ)
+    theta = r / f_eq
+    sin_theta = torch.sin(theta)
+    solid_angle_bias = 1.0 / (sin_theta + 1e-6)  # [N_rays]
+
+    # バイアスを weights に乗算（ブロードキャスト）
+    weights = weights * solid_angle_bias[:, None]  # [N_rays, N_bins]
+
+    # --- (2) 通常の sample_pdf 流れ ---
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
+
+    if det:
+        u = torch.linspace(0., 1., steps=N_samples, device=weights.device)
+        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        u = u ** 2  # optional: u^2で近距離集中
+    else:
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=weights.device)
+
+    inds = torch.searchsorted(cdf, u, right=True)
+    below = torch.clamp(inds - 1, min=0)
+    above = torch.clamp(inds, max=cdf.shape[-1] - 1)
+    inds_g = torch.stack([below, above], -1)
+
+    matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+    denom = cdf_g[..., 1] - cdf_g[..., 0]
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+    t = (u - cdf_g[..., 0]) / denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
 
     return samples

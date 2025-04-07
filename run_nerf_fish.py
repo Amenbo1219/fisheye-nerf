@@ -4,7 +4,8 @@ import imageio
 import json
 import random
 import time
-from load_synth360 import load_synth360_data
+
+from load_synth360_rtnK import load_synth360_data
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -58,12 +59,12 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     return outputs
 
 
-def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+def batchify_rays(rays_flat, chunk=1024*32,K=None, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        ret = render_rays(rays_flat[i:i+chunk], K=K,**kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -99,42 +100,49 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
       extras: dict with everything returned by render_rays().
     """
+    
     if c2w is not None:
         # special case to render full image
-        rays_o, rays_d = get_rays_fisyeye(H, W, K, c2w)
+        rays_o, rays_d, pixel_coords  = get_rays_fisyeye(H, W, K, c2w)
+        
     else:
         # use provided ray batch
-        rays_o, rays_d = rays
+        # rays_o, rays_d,pixel_coords = rays
+        rays_o = rays[:,0:3]
+        rays_d = rays[:,3:6]
+        pixel_coords = rays[:,6:8]
 
     if use_viewdirs:
         # provide ray directions as input
         viewdirs = rays_d
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
-            rays_o, rays_d = get_rays_fisyeye(H, W, K, c2w_staticcam)
+            rays_o, rays_d,pixel_coords  = get_rays_fisyeye(H, W, K, c2w_staticcam)
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
     if ndc:
+        # rays_o, rays_d = get_rays_fisyeye(H, W, K, c2w_staticcam)
+        
         # for forward facing scenew
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
         # rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
+    pixel_coords = torch.reshape(pixel_coords, [-1,2]).int()
 
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     # sp-rendering
     # near, far = near * torch.arctan(rays_d[...,1:2]), far *  torch.arctan(rays_d[...,1:2])
-
-    rays = torch.cat([rays_o, rays_d, near, far], -1)
+    rays = torch.cat([rays_o, rays_d, near, far,pixel_coords], -1)
     # save_tensor_to_npz(rays,"rays_all_info")
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(rays, chunk, **kwargs)
+    all_ret = batchify_rays(rays, chunk,K=K, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -331,7 +339,9 @@ def render_rays(ray_batch,
                 white_bkgd=False,
                 raw_noise_std=0.,
                 verbose=False,
-                pytest=False):
+                pytest=False,
+                K=None                
+                ):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -362,8 +372,10 @@ def render_rays(ray_batch,
       z_std: [num_rays]. Standard deviation of distances along ray for each
         sample.
     """
+
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
+    ray_pixel_coords = ray_batch[:, 8:]  # (i, j) ピクセル座標
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
@@ -394,7 +406,10 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
-
+    cx = K[0][2]
+    cy = K[1][2]
+    f_eq = K[0][0]
+    
 
     raw = network_query_fn(pts, viewdirs, network_fn) #     raw = run_network(pts)
     # save_tensor_to_npz(raw,"")
@@ -405,7 +420,24 @@ def render_rays(ray_batch,
         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
 
         z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+        if K is not None:
+
+            # print("sample_pdf_solid_angle is called")
+            z_samples = sample_pdf_solid_angle(
+                bins=z_vals_mid,                            # [N_rays, N_samples-1]
+                weights=weights[..., 1:-1],                 # [N_rays, N_samples-2]
+                ray_pixel_coords=ray_pixel_coords,          # [N_rays, 2]
+                cx=cx,
+                cy=cy,
+                f_eq=f_eq,
+                N_samples=N_importance,
+                det=(perturb == 0.),         
+            )
+        else:
+            z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
+            
+        
+        
         z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
@@ -483,7 +515,7 @@ def config_parser():
                         help='use full 5D input instead of 3D')
     parser.add_argument("--i_embed", type=int, default=0, 
                         help='set 0 for default positional encoding, -1 for none')
-    parser.add_argument("--multires", type=int, default=10, 
+    parser.add_argument("--multires", type=int, default=11, 
                         help='log2 of max freq for positional encoding (3D location)')
     parser.add_argument("--multires_views", type=int, default=4, 
                         help='log2 of max freq for positional encoding (2D direction)')
@@ -532,13 +564,13 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print",   type=int, default=100000, 
+    parser.add_argument("--i_print",   type=int, default=50000, 
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=5000, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=100000, 
+    parser.add_argument("--i_weights", type=int, default=50000, 
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=100000, 
+    parser.add_argument("--i_testset", type=int, default=50000, 
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=500000, 
                         help='frequency of render_poses video saving')
@@ -592,7 +624,8 @@ def train():
         print('NEAR FAR', near, far)
 
     if args.dataset_type == 'synth360':
-        images, poses, bds, render_poses, i_test= load_synth360_data(args.datadir)
+        # images, poses, bds, render_poses, i_test= load_synth360_data(args.datadir)
+        images, poses, bds, render_poses, i_test,K,masks= load_synth360_data(args.datadir)
         # print(i_test)
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
@@ -746,7 +779,7 @@ def train():
     if use_batching:
         # For random ray batching
         print('get rays')
-        rays = np.stack([get_rays_fisyeye_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+        rays = np.stack([get_rays_np_fisyeye(H, W, K, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
         print('done, concats')
         rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
@@ -808,7 +841,7 @@ def train():
             pose = poses[img_i, :3,:4]
 
             if N_rand is not None:
-                rays_o, rays_d = get_rays_fisyeye(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+                rays_o, rays_d,pixel_coords  = get_rays_fisyeye(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
                 # print(H,W,K)
                 if i < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
@@ -846,7 +879,8 @@ def train():
                 rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 
-                batch_rays = torch.stack([rays_o, rays_d], 0)## RAYのInfo()
+                # batch_rays = torch.stack([rays_o, rays_d], 0)## RAYのInfo()
+                batch_rays = torch.concat([rays_o, rays_d,select_coords], 1)## RAYのInfo()
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
 

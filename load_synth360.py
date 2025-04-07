@@ -14,15 +14,18 @@ def roll_rotation_matrix(angle_degrees):
 def transform_pose(line):
     # 元の姿勢行列を作成
     # make_transform_pose
+    X_FLIP = np.diag([-1.0, 1.0, 1.0])# X軸反転
     transform_pose = np.zeros((4,4),np.float32)
     transform_pose[3,3] = 1.0
     # make_rotationMATRIX
     rotation_matrix = np.array([float(x) for x in line[1:10]]).reshape(3,3)
     translation = np.array([float(x) for x in line[10:13]]).reshape(3)
+    rotation_matrix = rotation_matrix @ X_FLIP  
+    translation = translation @ X_FLIP 
+    # rotation_matrix = YAW_FIX@ rotation_matrix
     # roll_rotation = roll_rotation_matrix(-270)
     # -90Degree_FIXed
     # rotation_matrix = roll_rotation @ rotation_matrix
-    # translation = translation @ roll_rotation 
     # Applyed RotationMatrix
     transform_pose[:3,:3] = rotation_matrix
     transform_pose[0:3,3] = translation.T
@@ -43,7 +46,6 @@ def _load_data(basedir):
             line = line.split(" ")
             print(line[0]+".png", len(line))
             pose = transform_pose(line)
-            print(pose)
             poses.append(pose)
             img = imread(os.path.join(imgdir, line[0]+".png"))/255.
             # img = imread(os.path.join(imgdir, line[0]))/255.
@@ -53,7 +55,6 @@ def _load_data(basedir):
 
     imgs = np.array(imgs).astype(np.float32)
     poses = np.array(poses).astype(np.float32)
-
     return poses, imgs
 def normalize(x):
     return x / np.linalg.norm(x)
@@ -75,16 +76,50 @@ def poses_avg(poses):
     c2w = np.concatenate([viewmatrix(vec2, up, center), hwf], 1)
     
     return c2w
-def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
-    render_poses = []
-    rads = np.array(list(rads) + [1.])
-    hwf = c2w[:,4:5]
+
+# import numpy as np
+
+def interpolate_poses(poses, target_frames=200):
+    """
+    poses: (N, 4, 4) のPose行列（同次変換）
+    return: (target_frames, 4, 4) のPose行列（位置のみ等間隔補間）
+    """
+    positions = poses[:, :3, 3]     # (N, 3)
+    num_original = positions.shape[0]
+
+    # 等間隔な補間インデックス（float）
+    interp_indices = np.linspace(0, num_original - 1, target_frames)
+
+    interp_positions = []
+    for idx in interp_indices:
+        low = int(np.floor(idx))
+        high = min(low + 1, num_original - 1)
+        t = idx - low
+        interp_pos = (1 - t) * positions[low] + t * positions[high]
+        interp_positions.append(interp_pos)
+    interp_positions = np.array(interp_positions)  # (target_frames, 3)
+
+    # 回転（+その他）は最初のPoseの R を流用（3x3）
+    rot = poses[0, :3, :3]
+
+    # Pose再構築
+    new_poses = []
+    for i in range(target_frames):
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = rot
+        pose[:3, 3] = interp_positions[i]
+        new_poses.append(pose)
+
+    return np.stack(new_poses, axis=0)  # (target_frames, 4, 4)
+
+
+def normalize(poses):
+    SCALE = 2.0  # 1 unit → 1m に合わせたいなら
+    # normalized_matrices にスケーリングされた行列が格納されている
+    poses[:,0,3]*= SCALE
+    poses[:,2,3]*= SCALE
     
-    for theta in np.linspace(0., 2. * np.pi * rots, N+1)[:-1]:
-        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta*zrate), 1.]) * rads) 
-        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))
-        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1))
-    return render_poses
+    return poses
 # def load_synth360_data(basedir):
 #     poses, images = _load_data(basedir)
 
@@ -98,6 +133,8 @@ def load_synth360_data(basedir):
     l_poses, l_images = _load_data(test)
     images = np.concatenate([t_images,l_images],0)
     poses = np.concatenate([t_poses,l_poses],0)
+    poses = normalize(poses)
+    print(poses)
     bds = np.array([images.shape[1], images.shape[2], None])
 
     # NeRF座標系に逆変換
@@ -124,7 +161,8 @@ def load_synth360_data(basedir):
     # N_rots = 2
     # N_views = 120
     # render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
-    # render_poses = np.array(render_poses).astype(np.float32)
+    render_poses=interpolate_poses(poses).astype(np.float32)
+    # render_poses = np.array(poses).astype(np.float32)
     # # 
-    render_poses = np.array(l_poses).astype(np.float32)
+    # render_poses = np.array(l_poses).astype(np.float32)
     return images, poses, bds ,render_poses,i_test
